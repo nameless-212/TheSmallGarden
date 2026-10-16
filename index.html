@@ -1426,6 +1426,14 @@
   }
 
   // ---- Chapter switching (one chapter per page) ----
+  var currentChapterId = 'cover';
+
+  function scrollToTop() {
+    window.scrollTo(0, 0);
+    if (document.documentElement) document.documentElement.scrollTop = 0;
+    if (document.body) document.body.scrollTop = 0;
+  }
+
   function showChapter(id) {
     if (PAGE_IDS.indexOf(id) === -1) id = 'cover';
 
@@ -1442,7 +1450,10 @@
 
     if (TITLES[id]) document.title = id === 'cover' ? '小花园' : (TITLES[id] + ' · 小花园');
 
-    window.scrollTo(0, 0);
+    currentChapterId = id;
+    scrollToTop();
+    requestAnimationFrame(scrollToTop);
+    setTimeout(scrollToTop, 0);
     updateProgress();
 
     try { localStorage.setItem('nh-last', id); } catch (e) {}
@@ -1510,8 +1521,23 @@
     if (!startId) { try { startId = localStorage.getItem('nh-last') || 'cover'; } catch (e) { startId = 'cover'; } }
     showChapter(startId);
 
+    if ('scrollRestoration' in history) { try { history.scrollRestoration = 'manual'; } catch (e) {} }
+
     window.addEventListener('hashchange', function () {
       showChapter(location.hash ? location.hash.replace('#', '') : 'cover');
+    });
+
+    // 目录/站内锚点：交给 JS 切章，避免浏览器发生"跳转到锚点"的原生滚动
+    document.addEventListener('click', function (e) {
+      var el = e.target && e.target.closest ? e.target.closest('a[href^="#"]') : null;
+      if (!el) return;
+      var id = el.getAttribute('href').slice(1);
+      if (PAGE_IDS.indexOf(id) === -1) return;
+      e.preventDefault();
+      if (id !== currentChapterId) {
+        try { history.pushState({ ch: id }, '', '#' + id); } catch (err) { location.hash = id; }
+      }
+      showChapter(id);
     });
 
     window.addEventListener('scroll', updateProgress, { passive: true });
