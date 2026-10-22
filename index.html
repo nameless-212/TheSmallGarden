@@ -285,6 +285,7 @@
 
   .chapter-body p {
     margin-bottom: 1.2em;
+    margin-left: -3px;
     text-indent: 2em;
   }
   .chapter-body p:first-child { margin-top: 0; }
@@ -513,14 +514,20 @@
 
   body.player-open .page { padding-bottom: 160px; }
 
-  .chapter-body p { transition: background 0.25s; border-radius: 5px; }
+  .chapter-body p { transition: background 0.25s, border-color 0.25s; border-radius: 8px; border-left: 3px solid transparent; }
   .chapter-body p.tts-current {
     background: rgba(74,124,63,0.10);
-    box-shadow: inset 3px 0 0 var(--accent);
+    border-left-color: var(--accent);
+    padding: 6px 12px 6px 11px;
+    margin: -6px -12px calc(1.2em - 6px) -14px;
   }
   body.dark .chapter-body p.tts-current { background: rgba(157,184,143,0.13); }
 
   @media (max-width: 760px) {
+    .chapter-body p.tts-current {
+      padding: 5px 6px 5px 7px;
+      margin: -5px -6px calc(1.2em - 5px) -10px;
+    }
     .audio-player { left: 0; padding: 8px 12px; gap: 8px; }
     .ap-title { font-size: 12px; }
     .ap-status { display: none; }
