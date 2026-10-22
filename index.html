@@ -2242,7 +2242,10 @@
   function ttsSetVoice(v) {
     var i = parseInt(v, 10);
     TTS.voice = (!isNaN(i) && TTS.voices[i]) ? TTS.voices[i] : null;
-    try { localStorage.setItem('nh-tts-voice', isNaN(i) ? '' : String(i)); } catch (e) {}
+    try {
+      if (TTS.voice) localStorage.setItem('nh-tts-voice-name', TTS.voice.name);
+      else localStorage.setItem('nh-tts-voice-name', '__default__'); // 用户主动选了「默认语音」
+    } catch (e) {}
     if (TTS.playing) ttsRestart();
   }
 
@@ -2251,6 +2254,16 @@
     var b = document.getElementById('apAuto');
     if (b) b.className = TTS.autoNext ? 'ap-btn ap-toggle on' : 'ap-btn ap-toggle';
     try { localStorage.setItem('nh-tts-auto', TTS.autoNext ? '1' : '0'); } catch (e) {}
+  }
+
+  // 音色排序打分：神经网络 / 在线音色最自然，排在最前
+  function ttsVoiceScore(v) {
+    var s = 0;
+    if (/neural|natural|online|premium|enhanced/i.test(v.name)) s += 4;
+    if (/^zh[-_]?cn/i.test(v.lang)) s += 2;
+    else if (/^zh|^cmn/i.test(v.lang)) s += 1;
+    if (v.localService === false) s += 1;
+    return s;
   }
 
   function ttsInitVoices() {
@@ -2263,23 +2276,47 @@
       var v = all[i];
       if (/^zh|^cmn/i.test(v.lang) || /Chinese|中文|普通话|國語/i.test(v.name)) zh.push(v);
     }
-    TTS.voices = zh.length ? zh : all;
+    var list = zh.length ? zh.slice() : all.slice();
+    list.sort(function (a, b) { return ttsVoiceScore(b) - ttsVoiceScore(a); });
+    TTS.voices = list;
+
+    var hasNeural = false;
+    for (var n = 0; n < list.length; n++) {
+      if (/neural|natural|online|premium|enhanced/i.test(list[n].name)) { hasNeural = true; break; }
+    }
 
     function esc(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     }
     var html = '<option value="">默认语音</option>';
-    for (var j = 0; j < TTS.voices.length; j++) {
-      html += '<option value="' + j + '">' + esc(TTS.voices[j].name) + '</option>';
+    for (var j = 0; j < list.length; j++) {
+      var tag = (j === 0 && ttsVoiceScore(list[j]) >= 4) ? ' · 推荐' : '';
+      html += '<option value="' + j + '">' + esc(list[j].name) + tag + '</option>';
+    }
+    if (list.length && !hasNeural) {
+      html += '<option value="" disabled>未发现 Natural 音色，可在系统设置里安装</option>';
     }
     sel.innerHTML = html;
 
-    var saved = -1;
-    try { saved = parseInt(localStorage.getItem('nh-tts-voice'), 10); } catch (e) {}
-    if (!isNaN(saved) && saved >= 0 && saved < TTS.voices.length) {
-      sel.value = String(saved);
-      TTS.voice = TTS.voices[saved];
+    // 选音色：正在用的 > 上次保存的（按名字）> 排序第一（最自然）
+    var prevName = TTS.voice ? TTS.voice.name : '';
+    var savedName = '';
+    try { savedName = localStorage.getItem('nh-tts-voice-name') || ''; } catch (e) {}
+    var savedIdx = -1;
+    try { savedIdx = parseInt(localStorage.getItem('nh-tts-voice'), 10); } catch (e) {}
+
+    var pick = -1, want = prevName || savedName;
+    var explicitDefault = (!prevName && savedName === '__default__');
+    if (want && want !== '__default__') {
+      for (var k = 0; k < list.length; k++) {
+        if (list[k].name === want) { pick = k; break; }
+      }
     }
+    if (pick < 0 && !want && !isNaN(savedIdx) && savedIdx >= 0 && savedIdx < list.length) pick = savedIdx;
+    if (pick < 0 && !explicitDefault && list.length) pick = 0;
+
+    TTS.voice = pick > -1 ? list[pick] : null;
+    sel.value = pick > -1 ? String(pick) : '';
   }
 
   // 切章时重建朗读队列，并恢复该章上次听到的位置
