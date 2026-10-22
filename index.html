@@ -2006,11 +2006,15 @@
 <div class="cfg" id="cfgMask" onclick="ttsMaskClick(event)">
   <div class="cfg-box">
     <h3>语音设置</h3>
-    <p class="cfg-note">填入 Azure 语音服务（免费层每月约 50 万字符）的 Key，可获得接近真人的朗读。Key 只保存在这台设备的浏览器里，不会写进页面文件。</p>
-    <label class="cfg-row"><span>区域</span><input id="cfgRegion" placeholder="例如 eastasia" autocomplete="off"></label>
-    <label class="cfg-row"><span>Key</span><input id="cfgKey" type="password" placeholder="粘贴 Azure 的 Key 1" autocomplete="off"></label>
-    <label class="cfg-row"><span>音色</span><select id="cfgVoice"></select></label>
-    <p class="cfg-note" id="cfgMsg">未配置时按「本机 Neural 音色 → 免费在线音源」的顺序朗读。</p>
+    <label class="cfg-row"><span>服务</span><select id="cfgProvider" onchange="ttsProviderChange()"></select></label>
+    <label class="cfg-row" id="rowRegion"><span>区域</span><input id="cfgRegion" placeholder="例如 eastasia" autocomplete="off"></label>
+    <label class="cfg-row" id="rowBase"><span>地址</span><input id="cfgBase" placeholder="https://…/v1/audio/speech" autocomplete="off"></label>
+    <label class="cfg-row"><span>Key</span><input id="cfgKey" type="password" placeholder="粘贴 API Key" autocomplete="off"></label>
+    <label class="cfg-row"><span>模型</span><input id="cfgModel" placeholder="模型名" autocomplete="off"></label>
+    <label class="cfg-row"><span>音色</span><input id="cfgVoiceInput" list="cfgVoiceList" placeholder="音色名" autocomplete="off"><datalist id="cfgVoiceList"></datalist></label>
+    <p class="cfg-note" id="cfgTip"></p>
+    <p class="cfg-note" id="cfgMsg"></p>
+    <p class="cfg-note">Key 只保存在这台设备的浏览器里，不会写进页面文件。</p>
     <div class="cfg-actions">
       <button class="cfg-btn primary" onclick="ttsSaveCfg()">保存并试听</button>
       <button class="cfg-btn ghost" onclick="ttsClearCfg()">清除</button>
@@ -2134,87 +2138,147 @@
   ];
   var ONLINE = { api: 0, audio: null, pre: null, timer: null, retry: 0 };
 
-  // Azure 神经语音：免费层每月约 50 万字符，只给自用/小范围；Key 存本机，不写进页面
-  var AZ_VOICES = [
-    { id: 'zh-CN-XiaoxiaoNeural', label: '晓晓 · 女 · 温暖自然' },
-    { id: 'zh-CN-XiaoyiNeural', label: '晓伊 · 女 · 活泼' },
-    { id: 'zh-CN-XiaohanNeural', label: '晓涵 · 女 · 温柔' },
-    { id: 'zh-CN-YunxiNeural', label: '云希 · 男 · 年轻' },
-    { id: 'zh-CN-YunjianNeural', label: '云健 · 男 · 播音' },
-    { id: 'zh-CN-YunyangNeural', label: '云扬 · 男 · 新闻' }
+  var CLOUD = { provider: 'dashscope', key: '', region: '', base: '', model: '', voice: '', dead: false, retry: 0, cache: {}, order: [] };
+
+  // 这几家都允许浏览器直接调用，不用自己搭转发
+  var CLOUD_PROVIDERS = [
+    { id: 'dashscope', label: '阿里云百炼 Qwen-TTS', short: '百炼',
+      base: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+      model: 'qwen3-tts-flash',
+      voices: ['Cherry', 'Serena', 'Ethan', 'Chelsie'],
+      tip: '手机号注册阿里云即可，百炼新用户有免费额度；音色 Cherry 女 / Ethan 男。' },
+    { id: 'silicon', label: '硅基流动 CosyVoice2', short: '硅基流动',
+      base: 'https://api.siliconflow.cn/v1/audio/speech',
+      model: 'FunAudioLLM/CosyVoice2-0.5B',
+      voices: ['FunAudioLLM/CosyVoice2-0.5B:anna', 'FunAudioLLM/CosyVoice2-0.5B:bella',
+        'FunAudioLLM/CosyVoice2-0.5B:alex', 'FunAudioLLM/CosyVoice2-0.5B:benjamin'],
+      tip: '手机号注册，新用户送额度，按字符计费很便宜。' },
+    { id: 'azure', label: 'Azure 语音', short: 'Azure',
+      base: '', model: '', needRegion: true,
+      voices: ['zh-CN-XiaoxiaoNeural', 'zh-CN-XiaoyiNeural', 'zh-CN-XiaohanNeural',
+        'zh-CN-YunxiNeural', 'zh-CN-YunjianNeural', 'zh-CN-YunyangNeural'],
+      tip: '每月约 50 万字符免费，但注册需要国际信用卡。' },
+    { id: 'custom', label: '自定义（OpenAI 兼容）', short: '自定义',
+      base: '', model: '', voices: [],
+      tip: '任何兼容 /v1/audio/speech 的服务都能填，地址、模型、音色按服务商文档。' }
   ];
-  var AZ = { key: '', region: '', voice: 'zh-CN-XiaoxiaoNeural', dead: false, cache: {}, order: [] };
+
+  function cloudProvider(id) {
+    for (var i = 0; i < CLOUD_PROVIDERS.length; i++) {
+      if (CLOUD_PROVIDERS[i].id === id) return CLOUD_PROVIDERS[i];
+    }
+    return CLOUD_PROVIDERS[0];
+  }
 
   function azEsc(s) {
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
-  // 合成一段文本，返回可直接播放的 blob URL；同一文本 + 音色会缓存，避免重复计费
-  function azGet(text) {
-    var k = AZ.voice + '|' + text;
-    if (AZ.cache[k]) return Promise.resolve(AZ.cache[k]);
-    var ssml = "<speak version='1.0' xml:lang='zh-CN'><voice name='" + AZ.voice + "'>" + azEsc(text) + '</voice></speak>';
-    return fetch('https://' + AZ.region + '.tts.speech.microsoft.com/cognitiveservices/v1', {
-      method: 'POST',
-      headers: {
-        'Ocp-Apim-Subscription-Key': AZ.key,
-        'Content-Type': 'application/ssml+xml',
-        'X-Microsoft-OutputFormat': 'audio-24khz-96kbitrate-mono-mp3'
-      },
-      body: ssml
-    }).then(function (r) {
-      if (!r.ok) {
-        var err = new Error('azure-' + r.status);
-        err.status = r.status;
-        throw err;
-      }
-      return r.blob();
-    }).then(function (b) {
-      var url = URL.createObjectURL(b);
-      AZ.cache[k] = url;
-      AZ.order.push(k);
-      if (AZ.order.length > 40) {
-        var old = AZ.order.shift();
-        try { URL.revokeObjectURL(AZ.cache[old]); } catch (e) {}
-        delete AZ.cache[old];
+  // 合成一段文本，返回可直接播放的地址；同一文本会缓存，避免重复计费
+  function cloudGet(text) {
+    var k = CLOUD.provider + '|' + CLOUD.model + '|' + CLOUD.voice + '|' + text;
+    if (CLOUD.cache[k]) return Promise.resolve(CLOUD.cache[k].url);
+    var job;
+    var isBlob = CLOUD.provider !== 'dashscope';
+    if (CLOUD.provider === 'azure') {
+      var ssml = "<speak version='1.0' xml:lang='zh-CN'><voice name='" + CLOUD.voice + "'>" + azEsc(text) + '</voice></speak>';
+      job = fetch('https://' + CLOUD.region + '.tts.speech.microsoft.com/cognitiveservices/v1', {
+        method: 'POST',
+        headers: {
+          'Ocp-Apim-Subscription-Key': CLOUD.key,
+          'Content-Type': 'application/ssml+xml',
+          'X-Microsoft-OutputFormat': 'audio-24khz-96kbitrate-mono-mp3'
+        },
+        body: ssml
+      }).then(cloudBlob);
+    } else if (CLOUD.provider === 'dashscope') {
+      // 阿里云百炼：返回 24 小时有效的音频 URL，直接交给 <audio> 播放
+      job = fetch(CLOUD.base, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + CLOUD.key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: CLOUD.model,
+          input: { text: text, voice: CLOUD.voice, language_type: 'Chinese' }
+        })
+      }).then(cloudJson).then(function (j) {
+        var url = j && j.output && j.output.audio && j.output.audio.url;
+        if (!url) {
+          var e2 = new Error('cloud-no-url');
+          e2.status = 400;
+          throw e2;
+        }
+        return url;
+      });
+    } else {
+      // 硅基流动 / 其他 OpenAI 兼容服务：直接返回音频二进制
+      job = fetch(CLOUD.base, {
+        method: 'POST',
+        headers: { Authorization: 'Bearer ' + CLOUD.key, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: CLOUD.model, input: text, voice: CLOUD.voice, response_format: 'mp3' })
+      }).then(cloudBlob);
+    }
+    return job.then(function (url) {
+      CLOUD.cache[k] = { url: url, blob: isBlob };
+      CLOUD.order.push(k);
+      if (CLOUD.order.length > 40) {
+        var old = CLOUD.order.shift();
+        var item = CLOUD.cache[old];
+        if (item && item.blob) { try { URL.revokeObjectURL(item.url); } catch (e) {} }
+        delete CLOUD.cache[old];
       }
       return url;
     });
   }
 
-  function azFail(msg) {
-    AZ.dead = true; // 本次会话不再尝试，避免每句都等一次失败
+  function cloudBlob(r) {
+    if (!r.ok) { var e = new Error('cloud-' + r.status); e.status = r.status; throw e; }
+    return r.blob().then(function (b) { return URL.createObjectURL(b); });
+  }
+
+  function cloudJson(r) {
+    if (!r.ok) {
+      var e = new Error('cloud-' + r.status);
+      e.status = r.status;
+      throw e;
+    }
+    return r.json();
+  }
+
+  function cloudFail(msg) {
+    CLOUD.dead = true; // 本次会话不再尝试，避免每句都等一次失败
     TTS.engine = ttsHasCloudVoice() ? 'local' : 'online';
     var s = document.getElementById('apStatus');
     if (s) s.textContent = msg + '，已切回免费音源';
     setTimeout(function () { if (TTS.playing) ttsRestart(); }, 1000);
   }
 
-  function ttsSpeakAzure() {
+  function ttsSpeakCloud() {
     var seg = TTS.queue[TTS.idx];
     if (!seg) { ttsChapterEnd(); return; }
     var a = onlineEnsureAudio();
     var token = ++TTS.token;
+    if (TTS.audioIdx !== TTS.idx) CLOUD.retry = 0;
     ttsHighlight(true);
     ttsUpdateInfo();
     try { a.pause(); } catch (e) {}
     clearTimeout(ONLINE.timer);
-    azGet(seg.text).then(function (url) {
+    cloudGet(seg.text).then(function (url) {
       if (token !== TTS.token || !TTS.playing) return;
       TTS.audioIdx = TTS.idx;
       a.src = url;
       a.playbackRate = TTS.rate;
       ONLINE.timer = setTimeout(function () {
-        if (token === TTS.token && TTS.playing) azFail('Azure 响应超时');
+        if (token === TTS.token && TTS.playing) cloudFail('云端语音响应超时');
       }, 15000);
       var p = a.play();
       if (p && p.catch) p.catch(function () {});
     }).catch(function (err) {
       if (token !== TTS.token || !TTS.playing) return;
       var code = err && err.status;
-      azFail(code === 401 || code === 403 ? 'Azure Key 或区域不对'
-        : code === 429 ? 'Azure 免费额度可能已用完'
-        : 'Azure 连接失败');
+      cloudFail(code === 401 || code === 403 ? 'Key 无效或没权限'
+        : code === 429 ? '免费额度用完或被限流'
+        : code === 400 ? '模型或音色参数不对'
+        : '云端语音连不上');
     });
   }
 
@@ -2246,7 +2310,18 @@
     });
     a.addEventListener('error', function () {
       if (!TTS.playing) return;
-      if (TTS.engine === 'azure') { azFail('Azure 音频播放失败'); return; }
+      if (TTS.engine === 'cloud') {
+        // 云端音源报错：先清掉这条缓存重试一次，再不行才降级
+        if (CLOUD.retry < 1) {
+          CLOUD.retry++;
+          var ck = CLOUD.provider + '|' + CLOUD.model + '|' + CLOUD.voice + '|' + (TTS.queue[TTS.idx] ? TTS.queue[TTS.idx].text : '');
+          if (CLOUD.cache[ck]) { try { URL.revokeObjectURL(CLOUD.cache[ck].url); } catch (e) {} delete CLOUD.cache[ck]; }
+          ttsSpeakCloud();
+          return;
+        }
+        cloudFail('云端音频播放失败');
+        return;
+      }
       onlineNextApi();
     });
     ONLINE.audio = a;
@@ -2340,7 +2415,8 @@
       var total = TTS.queue.length;
       if (!total) sEl.textContent = '本页没有正文';
       else if (TTS.playing) {
-        var lab = TTS.engine === 'azure' ? 'Azure 朗读中 · ' : (TTS.engine === 'online' ? '在线朗读中 · ' : '朗读中 · ');
+        var lab = TTS.engine === 'cloud' ? (cloudProvider(CLOUD.provider).short + ' 朗读中 · ')
+          : (TTS.engine === 'online' ? '在线朗读中 · ' : '朗读中 · ');
         sEl.textContent = lab + Math.min(TTS.idx + 1, total) + ' / ' + total;
       }
       else if (TTS.idx >= total) sEl.textContent = '本章已读完';
@@ -2364,7 +2440,7 @@
   }
 
   function ttsSpeakCurrent() {
-    if (TTS.engine === 'azure') { ttsSpeakAzure(); return; }
+    if (TTS.engine === 'cloud') { ttsSpeakCloud(); return; }
     if (TTS.engine === 'online') { ttsSpeakOnline(); return; }
     var seg = TTS.queue[TTS.idx];
     if (!seg) { ttsChapterEnd(); return; }
@@ -2425,7 +2501,7 @@
 
   // 先 cancel 再 speak，规避部分浏览器 cancel 后立即朗读静默失败的问题
   function ttsRestart() {
-    if (TTS.engine === 'azure' || TTS.engine === 'online') {
+    if (TTS.engine === 'cloud' || TTS.engine === 'online') {
       try { if (ONLINE.audio && ONLINE.audio.pause) ONLINE.audio.pause(); } catch (e) {}
       ttsSpeakCurrent();
       return;
@@ -2444,9 +2520,9 @@
     return false;
   }
 
-  // 引擎优先级：配置了 Azure 就用它（最像真人）→ 本机云端 Neural（Edge）→ 免费在线音源
+  // 引擎优先级：配置了云端语音就用它（最像真人）→ 本机云端 Neural（Edge）→ 免费在线音源
   function ttsChooseEngine() {
-    if (AZ.key && AZ.region && !AZ.dead) TTS.engine = 'azure';
+    if (cloudReady()) TTS.engine = 'cloud';
     else TTS.engine = ttsHasCloudVoice() ? 'local' : 'online';
     if (document.body) document.body.setAttribute('data-tts-engine', TTS.engine);
     var sel = document.getElementById('apVoice');
@@ -2456,18 +2532,45 @@
     }
   }
 
-  function ttsOpenCfg() {
-    var sel = document.getElementById('cfgVoice');
-    sel.innerHTML = '';
-    for (var i = 0; i < AZ_VOICES.length; i++) {
-      sel.innerHTML += '<option value="' + AZ_VOICES[i].id + '">' + AZ_VOICES[i].label + '</option>';
+  function cloudReady() {
+    if (CLOUD.dead) return false;
+    if (!CLOUD.key) return false;
+    if (CLOUD.provider === 'azure') return !!CLOUD.region;
+    return !!CLOUD.base && !!CLOUD.model;
+  }
+
+  function ttsProviderChange() {
+    var p = cloudProvider(document.getElementById('cfgProvider').value);
+    CLOUD.provider = p.id;
+    document.getElementById('cfgBase').value = p.base || '';
+    document.getElementById('cfgModel').value = p.model || '';
+    var dl = document.getElementById('cfgVoiceList');
+    dl.innerHTML = '';
+    for (var i = 0; i < p.voices.length; i++) {
+      dl.innerHTML += '<option value="' + p.voices[i] + '"></option>';
     }
-    sel.value = AZ.voice;
-    document.getElementById('cfgRegion').value = AZ.region;
-    document.getElementById('cfgKey').value = AZ.key;
-    document.getElementById('cfgMsg').textContent = (AZ.key && AZ.region)
-      ? (AZ.dead ? '上次验证没通过，当前仍用免费音源。' : '已配置 Azure 音色，点播放即生效。')
-      : '未配置时按「本机 Neural 音色 → 免费在线音源」的顺序朗读。';
+    document.getElementById('cfgVoiceInput').value = p.voices[0] || '';
+    document.getElementById('rowRegion').style.display = p.needRegion ? 'flex' : 'none';
+    document.getElementById('cfgTip').textContent = p.tip;
+  }
+
+  function ttsOpenCfg() {
+    var sel = document.getElementById('cfgProvider');
+    if (!sel.options.length) {
+      for (var i = 0; i < CLOUD_PROVIDERS.length; i++) {
+        sel.innerHTML += '<option value="' + CLOUD_PROVIDERS[i].id + '">' + CLOUD_PROVIDERS[i].label + '</option>';
+      }
+    }
+    sel.value = CLOUD.provider;
+    document.getElementById('cfgRegion').value = CLOUD.region;
+    document.getElementById('cfgKey').value = CLOUD.key;
+    ttsProviderChange();
+    if (CLOUD.base) document.getElementById('cfgBase').value = CLOUD.base;
+    if (CLOUD.model) document.getElementById('cfgModel').value = CLOUD.model;
+    if (CLOUD.voice) document.getElementById('cfgVoiceInput').value = CLOUD.voice;
+    document.getElementById('cfgMsg').textContent = cloudReady()
+      ? '已配置，点播放即生效。'
+      : (CLOUD.dead ? '上次验证没通过，当前仍用免费音源。' : '未配置时按「本机 Neural 音色 → 免费在线音源」的顺序朗读。');
     document.getElementById('cfgMask').className = 'cfg show';
   }
 
@@ -2477,54 +2580,57 @@
 
   function ttsSaveCfg() {
     var msg = document.getElementById('cfgMsg');
-    AZ.region = (document.getElementById('cfgRegion').value || '').trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\..*$/, '');
-    AZ.key = (document.getElementById('cfgKey').value || '').trim();
-    AZ.voice = document.getElementById('cfgVoice').value;
-    AZ.dead = false;
-    AZ.cache = {};
-    AZ.order = [];
+    CLOUD.provider = document.getElementById('cfgProvider').value;
+    CLOUD.region = (document.getElementById('cfgRegion').value || '').trim().toLowerCase()
+      .replace(/^https?:\/\//, '').replace(/\..*$/, '');
+    CLOUD.base = (document.getElementById('cfgBase').value || '').trim();
+    CLOUD.key = (document.getElementById('cfgKey').value || '').trim();
+    CLOUD.model = (document.getElementById('cfgModel').value || '').trim();
+    CLOUD.voice = (document.getElementById('cfgVoiceInput').value || '').trim();
+    CLOUD.dead = false;
+    CLOUD.cache = {};
+    CLOUD.order = [];
     try {
-      if (AZ.key && AZ.region) {
-        localStorage.setItem('nh-az-key', AZ.key);
-        localStorage.setItem('nh-az-region', AZ.region);
-        localStorage.setItem('nh-az-voice', AZ.voice);
+      if (CLOUD.key) {
+        localStorage.setItem('nh-cloud', JSON.stringify({
+          provider: CLOUD.provider, key: CLOUD.key, region: CLOUD.region,
+          base: CLOUD.base, model: CLOUD.model, voice: CLOUD.voice
+        }));
       } else {
-        localStorage.removeItem('nh-az-key');
-        localStorage.removeItem('nh-az-region');
-        localStorage.removeItem('nh-az-voice');
+        localStorage.removeItem('nh-cloud');
       }
     } catch (e) {}
-    if (!AZ.key || !AZ.region) {
-      msg.textContent = '区域和 Key 没填完，仍用免费音源。';
+    if (!cloudReady()) {
+      msg.textContent = '还没填完（Key 必填，Azure 需区域，其他需地址与模型），仍用免费音源。';
       return;
     }
-    msg.textContent = '正在验证 Key…';
-    azGet('这是试听，用来确认 Key 和区域是否可用。').then(function () {
-      msg.textContent = 'Key 有效，已切换到 Azure 音色。';
+    msg.textContent = '正在验证，请稍等…';
+    cloudGet('这是试听，用来确认 Key、模型和音色是否可用。').then(function (url) {
+      msg.textContent = '配置有效，已切换到' + cloudProvider(CLOUD.provider).short + '音色。';
       ttsChooseEngine();
       if (TTS.playing) ttsRestart();
+      else onlineEnsureAudio().src = url;
     }).catch(function (err) {
-      AZ.dead = true;
+      CLOUD.dead = true;
       var code = err && err.status;
-      msg.textContent = (code === 401 || code === 403) ? 'Key 或区域不正确，请检查后重试。'
-        : code === 429 ? '额度已用完或请求过于频繁。'
-        : '连接失败：检查区域名（如 eastasia）与网络。';
+      msg.textContent = (code === 401 || code === 403) ? 'Key 无效或没有该模型的权限。'
+        : code === 429 ? '免费额度用完或被限流。'
+        : (code === 400 || code === 404) ? '模型或音色名不对，按服务商文档核对。'
+        : '连接失败，检查地址与网络。';
     });
   }
 
   function ttsClearCfg() {
-    AZ.key = '';
-    AZ.region = '';
-    AZ.dead = false;
-    AZ.cache = {};
-    AZ.order = [];
-    try {
-      localStorage.removeItem('nh-az-key');
-      localStorage.removeItem('nh-az-region');
-      localStorage.removeItem('nh-az-voice');
-    } catch (e) {}
+    CLOUD.key = '';
+    CLOUD.region = '';
+    CLOUD.base = '';
+    CLOUD.model = '';
+    CLOUD.voice = '';
+    CLOUD.dead = false;
+    CLOUD.cache = {};
+    CLOUD.order = [];
+    try { localStorage.removeItem('nh-cloud'); } catch (e) {}
     document.getElementById('cfgKey').value = '';
-    document.getElementById('cfgRegion').value = '';
     document.getElementById('cfgMsg').textContent = '已清除，回到免费音源。';
     ttsChooseEngine();
   }
@@ -2534,7 +2640,7 @@
     if (TTS.idx >= TTS.queue.length) TTS.idx = 0;
     ttsChooseEngine();
     TTS.playing = true;
-    if (TTS.engine === 'azure' || TTS.engine === 'online') {
+    if (TTS.engine === 'cloud' || TTS.engine === 'online') {
       // 暂停在同一句中间时，直接接着播，不重新请求
       var a = ONLINE.audio;
       if (a && TTS.audioIdx === TTS.idx && !a.ended && a.currentTime > 0) {
@@ -2543,7 +2649,7 @@
         ttsUpdateInfo();
         return;
       }
-      if (TTS.engine === 'azure') ttsSpeakAzure();
+      if (TTS.engine === 'cloud') ttsSpeakCloud();
       else ttsSpeakOnline();
       return;
     }
@@ -2554,7 +2660,7 @@
   function ttsPause() {
     TTS.playing = false;
     TTS.token++;
-    if (TTS.engine === 'azure' || TTS.engine === 'online') {
+    if (TTS.engine === 'cloud' || TTS.engine === 'online') {
       clearTimeout(ONLINE.timer);
       try { if (ONLINE.audio && ONLINE.audio.pause) ONLINE.audio.pause(); } catch (e) {}
       ttsUpdateInfo();
@@ -2641,7 +2747,7 @@
     TTS.rate = parseFloat(v) || 1;
     try { localStorage.setItem('nh-tts-rate', String(TTS.rate)); } catch (e) {}
     if (!TTS.playing) return;
-    if (TTS.engine === 'azure' || TTS.engine === 'online') {
+    if (TTS.engine === 'cloud' || TTS.engine === 'online') {
       // 在线/云端音源直接改播放速率，不必重新请求音频
       if (ONLINE.audio) ONLINE.audio.playbackRate = TTS.rate;
       return;
@@ -2816,9 +2922,16 @@
       for (var ai = 0; ai < ONLINE_APIS.length; ai++) {
         if (ONLINE_APIS[ai].key === apiKey) { ONLINE.api = ai; break; }
       }
-      AZ.key = localStorage.getItem('nh-az-key') || '';
-      AZ.region = localStorage.getItem('nh-az-region') || '';
-      AZ.voice = localStorage.getItem('nh-az-voice') || AZ_VOICES[0].id;
+      var saved = localStorage.getItem('nh-cloud');
+      if (saved) {
+        var cfg = JSON.parse(saved);
+        CLOUD.provider = cfg.provider || 'dashscope';
+        CLOUD.key = cfg.key || '';
+        CLOUD.region = cfg.region || '';
+        CLOUD.base = cfg.base || '';
+        CLOUD.model = cfg.model || '';
+        CLOUD.voice = cfg.voice || '';
+      }
     } catch (e) {}
     if (TTS_SUPPORTED) {
       ttsInitVoices();
