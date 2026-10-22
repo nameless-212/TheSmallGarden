@@ -362,6 +362,96 @@
     body { font-size: 16px; }
     .page { padding: 28px 15px 80px; }
   }
+
+  /* ---- 有声阅读 ---- */
+  .audio-player {
+    position: fixed;
+    left: 268px; right: 0; bottom: 0;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    padding: 10px 18px;
+    background: var(--nav-bg);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+    border-top: 1px solid var(--rule);
+    z-index: 95;
+    transform: translateY(101%);
+    transition: transform 0.32s ease, background 0.3s, border-color 0.3s;
+  }
+  .audio-player.show { transform: translateY(0); }
+
+  .ap-info { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+  .ap-title {
+    font-size: 13px; font-weight: 700; color: var(--accent);
+    letter-spacing: 0.08em;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .ap-status { font-size: 11px; color: var(--muted); letter-spacing: 0.05em; }
+
+  .ap-controls { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+
+  .ap-btn {
+    width: 34px; height: 34px;
+    border-radius: 8px;
+    border: 1px solid var(--rule);
+    background: transparent;
+    color: var(--accent);
+    font-size: 14px;
+    font-family: inherit;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: background 0.2s, border-color 0.2s;
+  }
+  .ap-btn:active { background: var(--rule); }
+  .ap-play {
+    width: 40px; height: 40px;
+    border-radius: 50%;
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--bg);
+    font-size: 15px;
+  }
+  .ap-play:active { opacity: 0.82; background: var(--accent); }
+  .ap-toggle { width: auto; padding: 0 9px; font-size: 12px; letter-spacing: 0.05em; }
+  .ap-toggle.on { background: rgba(74,124,63,0.12); border-color: var(--accent); }
+  body.dark .ap-toggle.on { background: rgba(157,184,143,0.14); }
+
+  .ap-select {
+    height: 34px;
+    max-width: 104px;
+    border: 1px solid var(--rule);
+    border-radius: 8px;
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    font-family: inherit;
+    padding: 0 2px;
+  }
+  body.dark .ap-select { color: var(--ink); }
+
+  body.player-open .page { padding-bottom: 160px; }
+
+  .chapter-body p { transition: background 0.25s; border-radius: 5px; }
+  .chapter-body p.tts-current {
+    background: rgba(74,124,63,0.10);
+    box-shadow: inset 3px 0 0 var(--accent);
+  }
+  body.dark .chapter-body p.tts-current { background: rgba(157,184,143,0.13); }
+
+  @media (max-width: 760px) {
+    .audio-player { left: 0; padding: 8px 12px; gap: 8px; }
+    .ap-title { font-size: 12px; }
+    .ap-status { display: none; }
+    .ap-btn { width: 32px; height: 32px; }
+    .ap-play { width: 38px; height: 38px; }
+    .ap-select { max-width: 74px; font-size: 11px; padding: 0 0; }
+    .ap-toggle { padding: 0 7px; font-size: 11px; }
+    body.player-open .page { padding-bottom: 130px; }
+  }
 </style>
 </head>
 <body>
@@ -372,6 +462,7 @@
     <span class="nav-title">小花园</span>
   </div>
   <div class="nav-right">
+    <button class="nav-btn" onclick="ttsTogglePanel()" id="ttsBtn" title="有声阅读" style="display:none">🔊</button>
     <button class="nav-btn" onclick="toggleTheme()" id="themeBtn" title="切换主题">🌙</button>
     <button class="nav-btn" onclick="toggleSize()" id="sizeBtn" title="字号">A</button>
   </div>
@@ -1811,6 +1902,28 @@
 
 </main>
 
+<div class="audio-player" id="audioPlayer">
+  <div class="ap-info">
+    <span class="ap-title" id="apTitle">小花园</span>
+    <span class="ap-status" id="apStatus">已暂停</span>
+  </div>
+  <div class="ap-controls">
+    <button class="ap-btn" id="apPrev" onclick="ttsSkip(-1)" title="上一段">⏮</button>
+    <button class="ap-btn ap-play" id="apPlay" onclick="ttsToggle()" title="播放 / 暂停">▶</button>
+    <button class="ap-btn" id="apNext" onclick="ttsSkip(1)" title="下一段">⏭</button>
+    <select class="ap-select" id="apRate" onchange="ttsSetRate(this.value)" title="语速">
+      <option value="0.8">0.8×</option>
+      <option value="1" selected>1.0×</option>
+      <option value="1.2">1.2×</option>
+      <option value="1.5">1.5×</option>
+      <option value="2">2.0×</option>
+    </select>
+    <select class="ap-select" id="apVoice" onchange="ttsSetVoice(this.value)" title="音色"></select>
+    <button class="ap-btn ap-toggle on" id="apAuto" onclick="ttsToggleAuto()" title="读完自动续读下一章">连播</button>
+    <button class="ap-btn" onclick="ttsClose()" title="停止并收起">✕</button>
+  </div>
+</div>
+
 <script>
   // 页面顺序与标题都从 DOM 里读——以后加章不必改这里
   var PAGE_IDS = [];
@@ -1850,6 +1963,8 @@
     updateProgress();
 
     try { localStorage.setItem('nh-last', id); } catch (e) {}
+
+    ttsSyncPage(id);
 
     if (window.innerWidth <= 760) closeSidebar();
   }
@@ -1896,6 +2011,321 @@
     if (pct) pct.textContent = Math.round(p) + '%';
   }
 
+  // ==================== 有声阅读（Web Speech API） ====================
+  var TTS_SUPPORTED = 'speechSynthesis' in window;
+  var TTS = {
+    queue: [],      // [{ el, text }]，按朗读顺序切好的短句
+    idx: 0,
+    playing: false,
+    active: false,  // 播放器是否展开
+    rate: 1,
+    voice: null,
+    voices: [],
+    pageId: null,
+    token: 0,       // 用来作废上一句的回调
+    autoNext: true,
+    pendingPlay: false
+  };
+
+  // 按标点把段落切成短句，避免单条语音过长被浏览器截断
+  function ttsChunk(text, max) {
+    var parts = text.match(/[^。！？…；!?;]+[。！？…；!?;]*/g) || [text];
+    var out = [], buf = '';
+    function flush() { if (buf.trim()) out.push(buf); buf = ''; }
+    for (var i = 0; i < parts.length; i++) {
+      var s = parts[i];
+      if (s.length > max) {
+        var sub = s.match(/[^，、,：]+[，、,：]*/g) || [s];
+        for (var j = 0; j < sub.length; j++) {
+          if (buf && buf.length + sub[j].length > max) flush();
+          buf += sub[j];
+        }
+      } else {
+        if (buf && buf.length + s.length > max) flush();
+        buf += s;
+      }
+    }
+    flush();
+    return out;
+  }
+
+  function ttsWarn() {
+    var s = document.getElementById('apStatus');
+    if (s) s.textContent = '当前浏览器不支持语音朗读';
+  }
+
+  function ttsSavePos() {
+    try { localStorage.setItem('nh-tts-' + TTS.pageId, String(TTS.idx)); } catch (e) {}
+  }
+
+  function ttsUpdateInfo() {
+    var tEl = document.getElementById('apTitle');
+    var sEl = document.getElementById('apStatus');
+    var bEl = document.getElementById('apPlay');
+    if (tEl) tEl.textContent = TITLES[TTS.pageId] || '小花园';
+    if (bEl) bEl.textContent = TTS.playing ? '⏸' : '▶';
+    if (sEl) {
+      var total = TTS.queue.length;
+      if (!total) sEl.textContent = '本页没有正文';
+      else if (TTS.playing) sEl.textContent = '朗读中 · ' + Math.min(TTS.idx + 1, total) + ' / ' + total;
+      else if (TTS.idx >= total) sEl.textContent = '本章已读完';
+      else sEl.textContent = '已暂停 · ' + (TTS.idx + 1) + ' / ' + total;
+    }
+  }
+
+  function ttsHighlight(scroll) {
+    each(document.querySelectorAll('.chapter-body p.tts-current'), function (el) {
+      el.className = el.className.replace(/\s*\btts-current\b/, '');
+    });
+    var seg = TTS.queue[TTS.idx];
+    if (!seg) return;
+    if (seg.el.className.indexOf('tts-current') === -1) seg.el.className += ' tts-current';
+    if (scroll) {
+      var r = seg.el.getBoundingClientRect();
+      if (r.top < 70 || r.bottom > window.innerHeight - 120) {
+        seg.el.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }
+  }
+
+  function ttsSpeakCurrent() {
+    var seg = TTS.queue[TTS.idx];
+    if (!seg) { ttsChapterEnd(); return; }
+    var token = ++TTS.token;
+    ttsHighlight(true);
+    ttsUpdateInfo();
+
+    var u = new SpeechSynthesisUtterance(seg.text);
+    u.lang = TTS.voice ? TTS.voice.lang : 'zh-CN';
+    u.rate = TTS.rate;
+    u.pitch = 1;
+    if (TTS.voice) u.voice = TTS.voice;
+    var startedAt = Date.now();
+
+    u.onend = function () {
+      if (token !== TTS.token || !TTS.playing) return;
+      // 系统里根本没有语音时，onend 会立刻触发；此时不要一路连播到最后一章
+      var noVoice = !speechSynthesis.getVoices || speechSynthesis.getVoices().length === 0;
+      if (noVoice && (Date.now() - startedAt) < 120) {
+        TTS.playing = false;
+        ttsUpdateInfo();
+        var st = document.getElementById('apStatus');
+        if (st) st.textContent = '未检测到可用语音，请检查系统语音设置';
+        return;
+      }
+      TTS.idx++;
+      ttsSavePos();
+      if (TTS.idx < TTS.queue.length) ttsSpeakCurrent();
+      else ttsChapterEnd();
+    };
+    u.onerror = function (e) {
+      if (token !== TTS.token || !TTS.playing) return;
+      if (e && (e.error === 'interrupted' || e.error === 'canceled')) return;
+      if (e && e.error === 'not-allowed') {
+        TTS.playing = false;
+        ttsUpdateInfo();
+        var s = document.getElementById('apStatus');
+        if (s) s.textContent = '请点按 ▶ 重新开始朗读';
+        return;
+      }
+      var err = e && e.error;
+      var noVoice = !speechSynthesis.getVoices || speechSynthesis.getVoices().length === 0;
+      if (err === 'synthesis-failed' || err === 'voice-unavailable' || err === 'language-unavailable' ||
+          (noVoice && (Date.now() - startedAt) < 120)) {
+        TTS.playing = false;
+        ttsUpdateInfo();
+        var s2 = document.getElementById('apStatus');
+        if (s2) s2.textContent = '未检测到可用语音，请检查系统语音设置';
+        return;
+      }
+      TTS.idx++;
+      if (TTS.idx < TTS.queue.length) ttsSpeakCurrent();
+      else ttsChapterEnd();
+    };
+
+    speechSynthesis.speak(u);
+  }
+
+  // 先 cancel 再 speak，规避部分浏览器 cancel 后立即朗读静默失败的问题
+  function ttsRestart() {
+    try { speechSynthesis.cancel(); } catch (e) {}
+    setTimeout(function () { if (TTS.playing) ttsSpeakCurrent(); }, 80);
+  }
+
+  function ttsPlay() {
+    if (!TTS_SUPPORTED) { ttsWarn(); return; }
+    if (!TTS.queue.length) return;
+    if (TTS.idx >= TTS.queue.length) TTS.idx = 0;
+    TTS.playing = true;
+    ttsRestart();
+  }
+
+  function ttsPause() {
+    TTS.playing = false;
+    TTS.token++;
+    try { speechSynthesis.cancel(); } catch (e) {}
+    ttsUpdateInfo();
+  }
+
+  function ttsToggle() {
+    if (!TTS.active) ttsShow();
+    if (TTS.playing) ttsPause();
+    else ttsPlay();
+  }
+
+  function ttsSkip(dir) {
+    if (!TTS.queue.length) return;
+    if (dir < 0) {
+      var i0 = Math.min(TTS.idx, TTS.queue.length - 1);
+      var cur = TTS.queue[i0];
+      var i = i0 - 1;
+      while (i > 0 && TTS.queue[i].el === cur.el) i--;
+      if (TTS.queue[i] && TTS.queue[i].el === cur.el) i = 0;
+      TTS.idx = Math.max(0, i);
+    } else {
+      TTS.idx = Math.min(TTS.queue.length - 1, TTS.idx + 1);
+    }
+    ttsSavePos();
+    if (TTS.playing) ttsRestart();
+    else { ttsHighlight(true); ttsUpdateInfo(); }
+  }
+
+  function ttsChapterEnd() {
+    TTS.playing = false;
+    TTS.token++;
+    try { speechSynthesis.cancel(); } catch (e) {}
+
+    var i = PAGE_IDS.indexOf(TTS.pageId);
+    if (TTS.autoNext && i > -1 && i < PAGE_IDS.length - 1) {
+      var nextId = PAGE_IDS[i + 1];
+      TTS.pendingPlay = true;
+      TTS.idx = 0;
+      try { history.replaceState(null, '', '#' + nextId); } catch (e) { location.hash = nextId; }
+      showChapter(nextId);
+      return;
+    }
+    TTS.idx = TTS.queue.length;
+    ttsUpdateInfo();
+  }
+
+  function ttsShow() {
+    TTS.active = true;
+    document.getElementById('audioPlayer').className = 'audio-player show';
+    document.body.classList.add('player-open');
+    ttsUpdateInfo();
+    ttsHighlight(true);
+  }
+
+  function ttsHide() {
+    TTS.active = false;
+    document.getElementById('audioPlayer').className = 'audio-player';
+    document.body.classList.remove('player-open');
+  }
+
+  function ttsClose() {
+    ttsPause();
+    ttsHide();
+  }
+
+  // 顶栏 🔊：展开并开始朗读 / 收起
+  function ttsTogglePanel() {
+    if (!TTS.active) { ttsShow(); ttsPlay(); }
+    else ttsClose();
+  }
+
+  function ttsSetRate(v) {
+    TTS.rate = parseFloat(v) || 1;
+    try { localStorage.setItem('nh-tts-rate', String(TTS.rate)); } catch (e) {}
+    if (TTS.playing) ttsRestart();
+  }
+
+  function ttsSetVoice(v) {
+    var i = parseInt(v, 10);
+    TTS.voice = (!isNaN(i) && TTS.voices[i]) ? TTS.voices[i] : null;
+    try { localStorage.setItem('nh-tts-voice', isNaN(i) ? '' : String(i)); } catch (e) {}
+    if (TTS.playing) ttsRestart();
+  }
+
+  function ttsToggleAuto() {
+    TTS.autoNext = !TTS.autoNext;
+    var b = document.getElementById('apAuto');
+    if (b) b.className = TTS.autoNext ? 'ap-btn ap-toggle on' : 'ap-btn ap-toggle';
+    try { localStorage.setItem('nh-tts-auto', TTS.autoNext ? '1' : '0'); } catch (e) {}
+  }
+
+  function ttsInitVoices() {
+    if (!TTS_SUPPORTED) return;
+    var sel = document.getElementById('apVoice');
+    if (!sel) return;
+    var all = speechSynthesis.getVoices() || [];
+    var zh = [];
+    for (var i = 0; i < all.length; i++) {
+      var v = all[i];
+      if (/^zh|^cmn/i.test(v.lang) || /Chinese|中文|普通话|國語/i.test(v.name)) zh.push(v);
+    }
+    TTS.voices = zh.length ? zh : all;
+
+    function esc(s) {
+      return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    }
+    var html = '<option value="">默认语音</option>';
+    for (var j = 0; j < TTS.voices.length; j++) {
+      html += '<option value="' + j + '">' + esc(TTS.voices[j].name) + '</option>';
+    }
+    sel.innerHTML = html;
+
+    var saved = -1;
+    try { saved = parseInt(localStorage.getItem('nh-tts-voice'), 10); } catch (e) {}
+    if (!isNaN(saved) && saved >= 0 && saved < TTS.voices.length) {
+      sel.value = String(saved);
+      TTS.voice = TTS.voices[saved];
+    }
+  }
+
+  // 切章时重建朗读队列，并恢复该章上次听到的位置
+  function ttsSyncPage(id) {
+    var page = document.getElementById(id);
+    var hasText = page && page.querySelector('.chapter-body p');
+    var btn = document.getElementById('ttsBtn');
+    if (btn) btn.style.display = hasText ? 'flex' : 'none';
+
+    ttsPause();
+    TTS.pageId = id;
+    TTS.queue = [];
+
+    if (!hasText) { ttsHide(); return; }
+
+    var ps = page.querySelectorAll('.chapter-body p');
+    each(ps, function (p) {
+      var txt = (p.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!txt) return;
+      var chunks = ttsChunk(txt, 70);
+      for (var i = 0; i < chunks.length; i++) TTS.queue.push({ el: p, text: chunks[i] });
+    });
+
+    var saved = 0;
+    try { saved = parseInt(localStorage.getItem('nh-tts-' + id), 10) || 0; } catch (e) {}
+    TTS.idx = (saved >= 0 && saved < TTS.queue.length) ? saved : 0;
+
+    var wantPlay = TTS.pendingPlay;
+    TTS.pendingPlay = false;
+
+    if (TTS.active) {
+      ttsUpdateInfo();
+      ttsHighlight(true);
+      if (wantPlay) ttsPlay();
+    }
+  }
+
+  if (TTS_SUPPORTED) {
+    window.addEventListener('beforeunload', function () {
+      try { speechSynthesis.cancel(); } catch (e) {}
+    });
+    if (typeof speechSynthesis.onvoiceschanged !== 'undefined') {
+      speechSynthesis.onvoiceschanged = ttsInitVoices;
+    }
+  }
+
   // ---- Init ----
   (function () {
     // restore theme
@@ -1921,6 +2351,24 @@
     window.addEventListener('scroll', updateProgress, { passive: true });
     window.addEventListener('resize', updateProgress);
     updateProgress();
+
+    // 有声阅读：恢复语速 / 连播偏好与音色列表
+    if (TTS_SUPPORTED) {
+      try {
+        var r = parseFloat(localStorage.getItem('nh-tts-rate'));
+        if (!isNaN(r)) {
+          TTS.rate = r;
+          var rateSel = document.getElementById('apRate');
+          if (rateSel) rateSel.value = String(r);
+        }
+        if (localStorage.getItem('nh-tts-auto') === '0') {
+          TTS.autoNext = false;
+          document.getElementById('apAuto').className = 'ap-btn ap-toggle';
+        }
+      } catch (e) {}
+      ttsInitVoices();
+      setTimeout(ttsInitVoices, 400); // 部分浏览器的语音列表是异步返回的
+    }
   })();
 </script>
 </body>
