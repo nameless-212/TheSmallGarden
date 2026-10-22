@@ -2123,6 +2123,7 @@
     pageId: null,
     token: 0,       // 用来作废上一句的回调
     audioIdx: -1,   // 在线音源：当前 Audio 里装的是第几段
+    loading: false, // 正在请求/合成，还没真正出声
     autoNext: true,
     pendingPlay: false
   };
@@ -2138,7 +2139,8 @@
   ];
   var ONLINE = { api: 0, audio: null, pre: null, timer: null, retry: 0 };
 
-  var CLOUD = { provider: 'dashscope', key: '', region: '', base: '', model: '', voice: '', dead: false, retry: 0, cache: {}, order: [] };
+  var CLOUD = { provider: 'dashscope', key: '', region: '', base: '', model: '', voice: '',
+    dead: false, retry: 0, lastIdx: -1, ctrl: null, cache: {}, order: [] };
 
   // 这几家都允许浏览器直接调用，不用自己搭转发
   var CLOUD_PROVIDERS = [
@@ -2174,6 +2176,27 @@
     return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  // 带超时的请求：服务端挂住不返回时必须能中断，否则朗读会静默卡死
+  function cloudFetch(url, opt, ms) {
+    var ctrl = (typeof AbortController !== 'undefined') ? new AbortController() : null;
+    if (ctrl) { opt.signal = ctrl.signal; CLOUD.ctrl = ctrl; }
+    var timer = setTimeout(function () { if (ctrl) ctrl.abort(); }, ms || 25000);
+    return fetch(url, opt).then(function (r) {
+      clearTimeout(timer);
+      if (CLOUD.ctrl === ctrl) CLOUD.ctrl = null;
+      return r;
+    }, function (err) {
+      clearTimeout(timer);
+      if (CLOUD.ctrl === ctrl) CLOUD.ctrl = null;
+      if (err && err.name === 'AbortError') {
+        var e = new Error('cloud-timeout');
+        e.status = 408;
+        throw e;
+      }
+      throw err;
+    });
+  }
+
   // 合成一段文本，返回可直接播放的地址；同一文本会缓存，避免重复计费
   function cloudGet(text) {
     var k = CLOUD.provider + '|' + CLOUD.model + '|' + CLOUD.voice + '|' + text;
@@ -2182,7 +2205,7 @@
     var isBlob = CLOUD.provider !== 'dashscope';
     if (CLOUD.provider === 'azure') {
       var ssml = "<speak version='1.0' xml:lang='zh-CN'><voice name='" + CLOUD.voice + "'>" + azEsc(text) + '</voice></speak>';
-      job = fetch('https://' + CLOUD.region + '.tts.speech.microsoft.com/cognitiveservices/v1', {
+      job = cloudFetch('https://' + CLOUD.region + '.tts.speech.microsoft.com/cognitiveservices/v1', {
         method: 'POST',
         headers: {
           'Ocp-Apim-Subscription-Key': CLOUD.key,
@@ -2193,7 +2216,7 @@
       }).then(cloudBlob);
     } else if (CLOUD.provider === 'dashscope') {
       // 阿里云百炼：返回 24 小时有效的音频 URL，直接交给 <audio> 播放
-      job = fetch(CLOUD.base, {
+      job = cloudFetch(CLOUD.base, {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + CLOUD.key, 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -2207,11 +2230,12 @@
           e2.status = 400;
           throw e2;
         }
-        return url;
+        // 百炼返回的是 http 的 OSS 地址，https 页面加载会被当成混合内容拦掉，这里统一升级
+        return url.indexOf('http://') === 0 ? 'https://' + url.slice(7) : url;
       });
     } else {
       // 硅基流动 / 其他 OpenAI 兼容服务：直接返回音频二进制
-      job = fetch(CLOUD.base, {
+      job = cloudFetch(CLOUD.base, {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + CLOUD.key, 'Content-Type': 'application/json' },
         body: JSON.stringify({ model: CLOUD.model, input: text, voice: CLOUD.voice, response_format: 'mp3' })
@@ -2246,6 +2270,7 @@
 
   function cloudFail(msg) {
     CLOUD.dead = true; // 本次会话不再尝试，避免每句都等一次失败
+    TTS.loading = false;
     TTS.engine = ttsHasCloudVoice() ? 'local' : 'online';
     var s = document.getElementById('apStatus');
     if (s) s.textContent = msg + '，已切回免费音源';
@@ -2257,7 +2282,8 @@
     if (!seg) { ttsChapterEnd(); return; }
     var a = onlineEnsureAudio();
     var token = ++TTS.token;
-    if (TTS.audioIdx !== TTS.idx) CLOUD.retry = 0;
+    if (CLOUD.lastIdx !== TTS.idx) { CLOUD.retry = 0; CLOUD.lastIdx = TTS.idx; }
+    TTS.loading = true;
     ttsHighlight(true);
     ttsUpdateInfo();
     try { a.pause(); } catch (e) {}
@@ -2271,10 +2297,16 @@
         if (token === TTS.token && TTS.playing) cloudFail('云端语音响应超时');
       }, 15000);
       var p = a.play();
-      if (p && p.catch) p.catch(function () {});
+      if (p && p.catch) p.catch(function (err) { ttsPlayBlocked(err); });
     }).catch(function (err) {
       if (token !== TTS.token || !TTS.playing) return;
       var code = err && err.status;
+      if (code === 408) {
+        // 服务端挂住不返回：重试一次，仍不行才降级
+        if (CLOUD.retry < 1) { CLOUD.retry++; ttsSpeakCloud(); return; }
+        cloudFail('云端合成超时');
+        return;
+      }
       cloudFail(code === 401 || code === 403 ? 'Key 无效或没权限'
         : code === 429 ? '免费额度用完或被限流'
         : code === 400 ? '模型或音色参数不对'
@@ -2293,6 +2325,7 @@
     a.addEventListener('playing', function () {
       clearTimeout(ONLINE.timer);
       ONLINE.retry = 0;
+      TTS.loading = false;
       TTS.onlineFailed = false;
       ttsUpdateInfo();
       if (TTS.engine === 'online') {
@@ -2345,6 +2378,7 @@
     ONLINE.retry++;
     if (ONLINE.retry > ONLINE_APIS.length) {
       TTS.playing = false;
+      TTS.loading = false;
       ONLINE.retry = 0;
       ttsUpdateInfo();
       var s = document.getElementById('apStatus');
@@ -2359,6 +2393,7 @@
     var seg = TTS.queue[TTS.idx];
     if (!seg) { ttsChapterEnd(); return; }
     var a = onlineEnsureAudio();
+    TTS.loading = true;
     ttsHighlight(true);
     ttsUpdateInfo();
     try { a.pause(); } catch (e) {}
@@ -2371,7 +2406,18 @@
       onlineNextApi();
     }, 9000);
     var p = a.play();
-    if (p && p.catch) p.catch(function () { /* 交给 error / 超时统一处理 */ });
+    if (p && p.catch) p.catch(function (err) { ttsPlayBlocked(err); });
+  }
+
+  // 浏览器拦截自动播放（离上次点击太久）时，不能假装在朗读
+  function ttsPlayBlocked(err) {
+    if (!err || err.name !== 'NotAllowedError') return;
+    TTS.playing = false;
+    TTS.loading = false;
+    clearTimeout(ONLINE.timer);
+    ttsUpdateInfo();
+    var s = document.getElementById('apStatus');
+    if (s) s.textContent = '浏览器拦截了自动播放，点 ▶ 继续 · ' + (TTS.idx + 1) + ' / ' + TTS.queue.length;
   }
 
   // 按标点把段落切成短句，避免单条语音过长被浏览器截断
@@ -2414,6 +2460,9 @@
     if (sEl) {
       var total = TTS.queue.length;
       if (!total) sEl.textContent = '本页没有正文';
+      else if (TTS.playing && TTS.loading) {
+        sEl.textContent = '合成中 · ' + Math.min(TTS.idx + 1, total) + ' / ' + total;
+      }
       else if (TTS.playing) {
         var lab = TTS.engine === 'cloud' ? (cloudProvider(CLOUD.provider).short + ' 朗读中 · ')
           : (TTS.engine === 'online' ? '在线朗读中 · ' : '朗读中 · ');
@@ -2444,6 +2493,7 @@
     if (TTS.engine === 'online') { ttsSpeakOnline(); return; }
     var seg = TTS.queue[TTS.idx];
     if (!seg) { ttsChapterEnd(); return; }
+    TTS.loading = false;
     var token = ++TTS.token;
     ttsHighlight(true);
     ttsUpdateInfo();
@@ -2645,7 +2695,7 @@
       var a = ONLINE.audio;
       if (a && TTS.audioIdx === TTS.idx && !a.ended && a.currentTime > 0) {
         var p = a.play();
-        if (p && p.catch) p.catch(function () { ttsSpeakCurrent(); });
+        if (p && p.catch) p.catch(function (err) { ttsPlayBlocked(err); });
         ttsUpdateInfo();
         return;
       }
@@ -2659,9 +2709,11 @@
 
   function ttsPause() {
     TTS.playing = false;
+    TTS.loading = false;
     TTS.token++;
     if (TTS.engine === 'cloud' || TTS.engine === 'online') {
       clearTimeout(ONLINE.timer);
+      if (CLOUD.ctrl) { try { CLOUD.ctrl.abort(); } catch (e) {} CLOUD.ctrl = null; }
       try { if (ONLINE.audio && ONLINE.audio.pause) ONLINE.audio.pause(); } catch (e) {}
       ttsUpdateInfo();
       return;
